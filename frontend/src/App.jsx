@@ -1,29 +1,30 @@
 import React, { useState, useEffect } from 'react';
 import { ShoppingCart, Wifi, WifiOff, Bell, BellRing, User, LogOut } from 'lucide-react';
 
-// Mock data directly in the frontend
-const mockProducts = [
-    { id: 1, name: 'Premium Wireless Headphones', price: 299.99, category: 'Electronics' },
-    { id: 2, name: 'Minimalist Smartwatch', price: 199.50, category: 'Accessories' },
-    { id: 3, name: 'Ergonomic Office Chair', price: 149.00, category: 'Furniture' },
-    { id: 4, name: 'Noise-Canceling Earbuds', price: 99.99, category: 'Electronics' },
-    { id: 5, name: 'Mechanical Keyboard', price: 129.00, category: 'Electronics' },
-    { id: 6, name: 'Stainless Steel Water Bottle', price: 24.99, category: 'Accessories' },
-    { id: 7, name: '4K Ultra HD Monitor', price: 349.99, category: 'Electronics' },
-    { id: 8, name: 'Wireless Charging Pad', price: 39.99, category: 'Accessories' },
-    { id: 9, name: 'Adjustable Standing Desk', price: 499.00, category: 'Furniture' },
-    { id: 10, name: 'Bluetooth Portable Speaker', price: 79.99, category: 'Electronics' },
-    { id: 11, name: 'Laptop Backpack', price: 59.95, category: 'Accessories' },
-    { id: 12, name: 'Gaming Mouse', price: 89.99, category: 'Electronics' }
-];
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001/api';
+const PUBLIC_VAPID_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY;
+
+// Utility to convert Base64 URL-safe string to Uint8Array for push subscription
+function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding)
+        .replace(/\-/g, '+')
+        .replace(/_/g, '/');
+
+    const rawData = window.atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+
+    for (let i = 0; i < rawData.length; ++i) {
+        outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+}
 
 function App() {
     const [products, setProducts] = useState([]);
     const [loading, setLoading] = useState(true);
     const [isOnline, setIsOnline] = useState(navigator.onLine);
-
-    // Checking, Supported, Subscribed, Not Supported/Denied
-    const [pushStatus, setPushStatus] = useState('Supported (Local Demo)');
+    const [pushStatus, setPushStatus] = useState('Checking...');
 
     // Auth State
     const [user, setUser] = useState(null);
@@ -41,10 +42,13 @@ function App() {
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
 
-        // 2. Fetch Products (Mocked)
+        // 2. Fetch Products
         fetchProducts();
 
-        // 3. Check Local Auth
+        // 3. Check Push Notification Status
+        checkPushStatus();
+
+        // 4. Check Local Auth
         const storedUser = localStorage.getItem('lumina_user');
         if (storedUser) {
             setUser(JSON.parse(storedUser));
@@ -56,38 +60,48 @@ function App() {
         };
     }, []);
 
-    const fetchProducts = () => {
+    const fetchProducts = async () => {
         setLoading(true);
-        // Simulate network delay for the skeleton loader effect to show
-        setTimeout(() => {
-            setProducts(mockProducts);
+        try {
+            const response = await fetch(`${API_BASE_URL}/products`);
+            if (!response.ok) throw new Error('Network response was not ok');
+            const data = await response.json();
+            setProducts(data);
+        } catch (error) {
+            console.error("Failed to fetch products:", error);
+        } finally {
             setLoading(false);
-        }, 800);
+        }
     };
 
-    const handleAuthSubmit = (e) => {
+    const handleAuthSubmit = async (e) => {
         e.preventDefault();
         setAuthError('');
+        const endpoint = isLoginView ? '/auth/login' : '/auth/signup';
 
-        // Simulate authentication directly on the frontend
-        if (!authEmail.includes('@')) {
-            setAuthError('Please enter a valid email.');
-            return;
+        try {
+            const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: authEmail, password: authPassword })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || 'Authentication failed');
+            }
+
+            // Success
+            setUser(data.user);
+            localStorage.setItem('lumina_token', data.token);
+            localStorage.setItem('lumina_user', JSON.stringify(data.user));
+            setShowAuthModal(false);
+            setAuthEmail('');
+            setAuthPassword('');
+        } catch (err) {
+            setAuthError(err.message);
         }
-        if (authPassword.length < 5) {
-            setAuthError('Password too short for this demo.');
-            return;
-        }
-
-        // Success Mock
-        const mockUser = { email: authEmail };
-        setUser(mockUser);
-        localStorage.setItem('lumina_token', 'mock_token_123');
-        localStorage.setItem('lumina_user', JSON.stringify(mockUser));
-
-        setShowAuthModal(false);
-        setAuthEmail('');
-        setAuthPassword('');
     };
 
     const handleLogout = () => {
@@ -96,11 +110,26 @@ function App() {
         localStorage.removeItem('lumina_user');
     };
 
-    const subscribeToPush = async () => {
-        if (!('Notification' in window)) {
+    const checkPushStatus = async () => {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
             setPushStatus('Not Supported');
             return;
         }
+
+        try {
+            const registration = await navigator.serviceWorker.ready;
+            const subscription = await registration.pushManager.getSubscription();
+            if (subscription) {
+                setPushStatus('Subscribed');
+            } else {
+                setPushStatus('Supported (Not Subscribed)');
+            }
+        } catch (e) {
+            setPushStatus('Error checking push');
+        }
+    };
+
+    const subscribeToPush = async () => {
         setPushStatus('Subscribing...');
         try {
             const permission = await Notification.requestPermission();
@@ -108,8 +137,25 @@ function App() {
                 setPushStatus('Permission Denied');
                 return;
             }
+
+            const registration = await navigator.serviceWorker.ready;
+
+            const subscription = await registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(PUBLIC_VAPID_KEY)
+            });
+
+            // Send to backend
+            await fetch(`${API_BASE_URL}/subscribe`, {
+                method: 'POST',
+                body: JSON.stringify(subscription),
+                headers: {
+                    'content-type': 'application/json'
+                }
+            });
+
             setPushStatus('Subscribed');
-            console.log('Subscribed to local notifications for demo purposes!');
+            console.log('Subscribed to push notifications!');
         } catch (error) {
             console.error('Error subscribing to push:', error);
             setPushStatus('Subscription Failed');
@@ -118,14 +164,15 @@ function App() {
 
     const triggerMockNotification = async () => {
         try {
-            const registration = await navigator.serviceWorker.ready;
-            await registration.showNotification('🔥 Flash Sale Triggered!', {
-                body: 'This is a mock local push notification sent without a backend server.',
-                icon: '/icons/icon-192x192.png',
-                vibrate: [100, 50, 100],
-                data: { url: '/' }
+            await fetch(`${API_BASE_URL}/sendNotification`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title: '🔥 Flash Sale Triggered!',
+                    body: 'This is a real push notification sent from the backend through MongoDB subscriptions.'
+                })
             });
-            console.log("Local notification triggered.");
+            console.log("Push notification triggered from backend.");
         } catch (e) {
             console.error("Failed to trigger mock notification", e);
         }
@@ -133,7 +180,6 @@ function App() {
 
     return (
         <>
-            {/* Navbar Shell */}
             <nav className="navbar glass-panel">
                 <div className="brand">
                     <span className="title-gradient">Lumina</span> Tech
@@ -169,17 +215,16 @@ function App() {
 
             {!isOnline && (
                 <div className="offline-banner">
-                    <WifiOff size={18} /> You are currently offline. Viewing cached PWA shell.
+                    <WifiOff size={18} /> You are currently offline. Viewing cached products.
                 </div>
             )}
 
-            {/* Auth Modal Overlay */}
             {showAuthModal && (
                 <div className="modal-overlay" onClick={(e) => { if (e.target.className === 'modal-overlay') setShowAuthModal(false) }}>
                     <div className="modal-content glass animate-fade-in">
                         <h2>{isLoginView ? 'Welcome Back' : 'Create Account'}</h2>
                         <p style={{ color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
-                            {isLoginView ? 'Sign in to access your premium gear. (Mock Backend)' : 'Join Lumina Tech today. (Mock Backend)'}
+                            {isLoginView ? 'Sign in to access your premium gear.' : 'Join Lumina Tech today.'}
                         </p>
 
                         {authError && <div className="error-message">{authError}</div>}
@@ -226,23 +271,21 @@ function App() {
                 </div>
             )}
 
-            {/* Main Content */}
             <main className="container animate-fade-in">
                 <header className="page-header">
                     <h1 style={{ fontSize: '3rem', marginBottom: '0.5rem' }}>Premium Gear, <span className="title-gradient">Zero Wait.</span></h1>
                     <p>Experience lightning-fast browsing whether online or offline powered by modern PWA architecture.</p>
                 </header>
 
-                {/* Push Notification Promo Card */}
                 <section className="push-promo glass">
                     <BellRing size={32} color="#c084fc" className="mb-2" />
                     <h3>Stay in the Loop</h3>
-                    <p>Enable local notifications to see how the service worker handles alerts instantly!</p>
+                    <p>Enable push notifications to get instantly alerted about flash sales and new premium arrivals. (Requires supported browser)</p>
 
                     <div className="push-actions">
                         {pushStatus === 'Subscribed' ? (
                             <button onClick={triggerMockNotification} className="btn btn-primary">
-                                <Bell size={18} /> Trigger Local Notification
+                                <Bell size={18} /> Trigger Backend Push Notification
                             </button>
                         ) : (
                             <button
@@ -250,16 +293,14 @@ function App() {
                                 className="btn btn-primary"
                                 disabled={pushStatus.includes('Not Supported') || pushStatus.includes('Denied') || pushStatus === 'Subscribing...'}
                             >
-                                <Bell size={18} /> {pushStatus === 'Supported (Local Demo)' ? 'Subscribe Now' : pushStatus}
+                                <Bell size={18} /> {pushStatus === 'Supported (Not Subscribed)' ? 'Subscribe Now' : pushStatus}
                             </button>
                         )}
                     </div>
                 </section>
 
-                {/* Product Grid */}
                 <div className="product-grid">
                     {loading ? (
-                        // Skeletons
                         Array.from({ length: 12 }).map((_, i) => (
                             <div key={i} className="product-card glass">
                                 <div className="skeleton" style={{ width: '100%', aspectRatio: '4/3' }}></div>
